@@ -11,4 +11,4 @@ Choose as user command (user dropdown), hub command (top hub dropdown) or both.
 
 web client daemon does not expose available hub commands so it's not possible to import whatever commands the hub has available. It's all manual work.
 
-It also creates a command.txt file in the extensions settings folder if you want to manage yoyr commands that way instead of in the web ui.
+It also creates a command.txt file in the extensions settings folder if you want to manage your commands that way instead of in the web ui.
