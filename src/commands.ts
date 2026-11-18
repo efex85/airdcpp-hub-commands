@@ -17,6 +17,63 @@ export const MAX_USERS_PER_CLICK = 10;
 
 const NICK_VARIABLE = '{nick}';
 
+// Variables available in the command texts:
+//   {nick}              nick of the selected user (user menus only)
+//   {input}             text that is asked from the user when the command is selected
+//   {input:Show name}   same as above but the input box is labeled with the given text
+// Every different label gets its own input box (the same label used again reuses the same box)
+const VARIABLE_REGEX = /\{nick\}|\{input(?::[^}]*)?\}/g;
+const INPUT_VARIABLE_REGEX = /\{input(?::([^}]*))?\}/g;
+
+export const DEFAULT_INPUT_LABEL = 'Input';
+export const INPUT_FORM_KEY_PREFIX = 'input_';
+
+// The menu forms are not supported by all clients
+const FORM_SUPPORT = 'form';
+
+export interface InputField {
+  key: string;
+  label: string;
+}
+
+const getVariableLabel = (variable: string) => {
+  const match = /^\{input(?::([^}]*))?\}$/.exec(variable);
+  return (match && match[1] && match[1].trim()) || DEFAULT_INPUT_LABEL;
+};
+
+// Distinct input labels in the order they first appear in the text (labels are not case sensitive)
+export const getInputFields = (command: HubCommand): InputField[] => {
+  const fields: InputField[] = [];
+  const seen = new Set<string>();
+
+  for (const match of command.text.matchAll(INPUT_VARIABLE_REGEX)) {
+    const label = getVariableLabel(match[0]);
+    const id = label.toLowerCase();
+    if (!seen.has(id)) {
+      seen.add(id);
+      fields.push({ key: `${INPUT_FORM_KEY_PREFIX}${fields.length + 1}`, label });
+    }
+  }
+
+  return fields;
+};
+
+export const hasInputVariable = (command: HubCommand) => getInputFields(command).length > 0;
+
+// Variables are replaced in a single pass so that the replacement values can't be treated as variables
+// The inputs are given by the lower case label
+export const renderText = (text: string, values: { nick?: string, inputs?: { [label: string]: string } }) => {
+  return text.replace(VARIABLE_REGEX, match => {
+    const value = match === NICK_VARIABLE
+      ? values.nick
+      : values.inputs?.[getVariableLabel(match).toLowerCase()];
+
+    return value !== undefined ? value : match;
+  });
+};
+
+type FormValues = { [key: string]: unknown };
+
 export interface Context {
   api: APIType;
   logger: Logger;
@@ -120,19 +177,35 @@ const resolveNick = async (context: Context, sessionId: number, userId: number) 
   throw new Error(`The nick of user ${userId} could not be found (the user has left the hub and has no recent chat messages)`);
 };
 
-const getMessages = async (context: Context, command: HubCommand, sessionId: number, userIds: number[]) => {
+const getMessages = async (context: Context, command: HubCommand, sessionId: number, userIds: number[], inputs?: { [label: string]: string }) => {
   if (!command.text.includes(NICK_VARIABLE)) {
-    return [ command.text ];
+    return [ renderText(command.text, { inputs }) ];
   }
 
   const nicks = await Promise.all(userIds.slice(0, MAX_USERS_PER_CLICK).map(id => resolveNick(context, sessionId, id)));
-  return nicks.map(nick => command.text.split(NICK_VARIABLE).join(nick));
+  return nicks.map(nick => renderText(command.text, { nick, inputs }));
 };
 
-const sendCommand = async (context: Context, command: HubCommand, sessionId: number, userIds: number[]) => {
+const sendCommand = async (context: Context, command: HubCommand, sessionId: number, userIds: number[], formValues?: FormValues) => {
   const { api, logger } = context;
 
   try {
+    let inputs: { [label: string]: string } | undefined;
+    const fields = getInputFields(command);
+    if (fields.length > 0) {
+      inputs = {};
+      for (const field of fields) {
+        const value = formValues ? formValues[field.key] : undefined;
+        const text = typeof value === 'string' ? value.trim() : '';
+        if (!text) {
+          await api.postEvent(`Hub commands: nothing was entered for "${field.label}" in "${command.name}", the command was not sent`, SeverityEnum.WARNING);
+          return;
+        }
+
+        inputs[field.label.toLowerCase()] = text;
+      }
+    }
+
     if (command.text.includes(NICK_VARIABLE) && userIds.length > MAX_USERS_PER_CLICK) {
       await api.postEvent(
         `Hub commands: only the first ${MAX_USERS_PER_CLICK} selected users were used for "${command.name}"`,
@@ -140,7 +213,7 @@ const sendCommand = async (context: Context, command: HubCommand, sessionId: num
       );
     }
 
-    const messages = await getMessages(context, command, sessionId, userIds);
+    const messages = await getMessages(context, command, sessionId, userIds, inputs);
 
     // Send one at a time to keep the order and to avoid hub flood protections
     for (const text of messages) {
@@ -170,7 +243,22 @@ const getItemBase = (context: Context, command: HubCommand, index: number) => ({
     semantic: command.icon || 'terminal',
   },
   access: 'hubs_send',
+
+  // Ask for the values of the {input} variables, one box for each different label
+  ...(hasInputVariable(command) ? {
+    formDefinitions: getInputFields(command).map(field => ({
+      key: field.key,
+      title: field.label,
+      type: 'string',
+      default_value: '',
+    })),
+  } : {}),
 });
+
+// Commands asking for input can't be used when the client doesn't support menu forms
+const isSupported = (command: HubCommand, supports: string[]) => {
+  return !hasInputVariable(command) || supports.includes(FORM_SUPPORT);
+};
 
 // All hubs must match when the command is limited to a specific hub
 const matchesAllHubs = async (
@@ -200,10 +288,12 @@ export const getUserMenuItems = (context: Context): ContextMenuItem<number, numb
     .filter(command => command.placement !== 'hub')
     .map((command, index) => ({
       ...getItemBase(context, command, index),
-      filter: ({ entityId }) => matchesAllHubs(context, getHubUrl, command, [ entityId ]),
-      onClick: ({ selectedIds, entityId }) => {
+      filter: async ({ entityId, supports }) => {
+        return isSupported(command, supports) && await matchesAllHubs(context, getHubUrl, command, [ entityId ]);
+      },
+      onClick: ({ selectedIds, entityId, formValues }) => {
         // The helper doesn't wait for the handler, sendCommand takes care of its own errors
-        return sendCommand(context, command, entityId, selectedIds) as unknown as void;
+        return sendCommand(context, command, entityId, selectedIds, formValues as FormValues) as unknown as void;
       },
     }));
 };
@@ -218,11 +308,13 @@ export const getHubMenuItems = (context: Context): ContextMenuItem<number, undef
     .map((command, index) => ({ command, index }))
     .map(({ command, index }) => ({
       ...getItemBase(context, command, index),
-      filter: ({ selectedIds }) => matchesAllHubs(context, getHubUrl, command, selectedIds),
-      onClick: ({ selectedIds }) => {
+      filter: async ({ selectedIds, supports }) => {
+        return isSupported(command, supports) && await matchesAllHubs(context, getHubUrl, command, selectedIds);
+      },
+      onClick: ({ selectedIds, formValues }) => {
         const sendAll = async () => {
           for (const sessionId of selectedIds) {
-            await sendCommand(context, command, sessionId, []);
+            await sendCommand(context, command, sessionId, [], formValues as FormValues);
           }
         };
 

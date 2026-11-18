@@ -1,7 +1,7 @@
 import { addContextMenuItems } from 'airdcpp-apisocket';
 
 import {
-  commandMatchesHub, Context, getHubMenuItems, getUserMenuItems, HUB_MENU_TYPE, HUB_USER_MENU_TYPE,
+  commandMatchesHub, Context, getInputFields, hasInputVariable, renderText, getHubMenuItems, getUserMenuItems, HUB_MENU_TYPE, HUB_USER_MENU_TYPE,
   MAX_USERS_PER_CLICK, normalizeHubUrl,
 } from '../commands';
 import { HubCommand } from '../types';
@@ -320,6 +320,158 @@ describe('hub session menu (hub)', () => {
 
     await remove();
     expect(mock.removed.sort()).toEqual([ 'hook:hub_list_menuitems', 'listener:hub_menuitem_selected' ]);
+  });
+});
+
+describe('input variable', () => {
+  const INPUT_COMMANDS: HubCommand[] = [
+    { name: 'TV', text: '+tv {input:Show name}', placement: 'both' },
+    { name: 'Plain input', text: '+find {input}', placement: 'both' },
+    { name: 'Slap with reason', text: '+slap {nick} {input:Reason}', placement: 'user' },
+    { name: 'Static', text: '+help', placement: 'both' },
+  ];
+
+  const FORM = [ 'form' ];
+
+  test('variable parsing', () => {
+    expect(hasInputVariable({ name: 'a', text: '+tv {input}' })).toBe(true);
+    expect(hasInputVariable({ name: 'a', text: '+tv {nick}' })).toBe(false);
+    expect(getInputFields({ name: 'a', text: '+tv {input:Show name }' })).toEqual([ { key: 'input_1', label: 'Show name' } ]);
+    expect(getInputFields({ name: 'a', text: '+tv {input}' })).toEqual([ { key: 'input_1', label: 'Input' } ]);
+    expect(getInputFields({ name: 'a', text: '+tv {input:}' })).toEqual([ { key: 'input_1', label: 'Input' } ]);
+    expect(getInputFields({ name: 'a', text: '+reg {nick} {input:username} {input:profile} {INPUT:Username}' })).toEqual([
+      { key: 'input_1', label: 'username' },
+      { key: 'input_2', label: 'profile' },
+    ]);
+  });
+
+  test('variables are replaced in a single pass', () => {
+    expect(renderText('+tv {input:Show} / {input}', { inputs: { show: 'The Wire' } })).toBe('+tv The Wire / {input}');
+    expect(renderText('{nick} {input:X}', { nick: 'alice', inputs: { x: 'hi {nick}' } })).toBe('alice hi {nick}');
+    expect(renderText('{nick}', { nick: '$& $1' })).toBe('$& $1');
+    expect(renderText('{nick} {input}', {})).toBe('{nick} {input}');
+  });
+
+  test('the menu item asks for the input with the given label', async () => {
+    const { context } = createContext(INPUT_COMMANDS);
+    const mock = createMockSocket();
+    await addContextMenuItems(mock.socket, getUserMenuItems(context), HUB_USER_MENU_TYPE, { id: 'airdcpp-hub-commands', name: 'Hub commands' });
+
+    const list = await mock.listItems(HUB_USER_MENU_TYPE, { selected_ids: [ 11 ], entity_id: 1, supports: FORM });
+    const tv = list.menuitems.find((i: any) => i.title === 'TV');
+    expect(tv.form_definitions).toEqual([ { key: 'input_1', title: 'Show name', type: 'string', default_value: '' } ]);
+
+    const plain = list.menuitems.find((i: any) => i.title === 'Plain input');
+    expect(plain.form_definitions[0].title).toBe('Input');
+
+    // Static commands have no form
+    expect(list.menuitems.find((i: any) => i.title === 'Static').form_definitions).toBeUndefined();
+  });
+
+  test('commands asking for input are hidden when the client does not support forms', async () => {
+    const { context } = createContext(INPUT_COMMANDS);
+    const mock = createMockSocket();
+    await addContextMenuItems(mock.socket, getUserMenuItems(context), HUB_USER_MENU_TYPE, { id: 'airdcpp-hub-commands', name: 'Hub commands' });
+
+    const list = await mock.listItems(HUB_USER_MENU_TYPE, { selected_ids: [ 11 ], entity_id: 1, supports: [] });
+    expect(list.menuitems.map((i: any) => i.title)).toEqual([ 'Static' ]);
+  });
+
+  test('the entered text is sent from the user menu', async () => {
+    const { context, sent } = createContext(INPUT_COMMANDS);
+    const mock = createMockSocket();
+    await addContextMenuItems(mock.socket, getUserMenuItems(context), HUB_USER_MENU_TYPE, { id: 'airdcpp-hub-commands', name: 'Hub commands' });
+
+    const list = await mock.listItems(HUB_USER_MENU_TYPE, { selected_ids: [ 11 ], entity_id: 1, supports: FORM });
+    const tv = list.menuitems.find((i: any) => i.title === 'TV');
+
+    await mock.select(HUB_USER_MENU_TYPE, {
+      hook_id: 'airdcpp-hub-commands', menuitem_id: tv.id, selected_ids: [ 11 ], entity_id: 1, supports: FORM,
+      form_values: { input_1: '  The Wire  ' },
+    });
+    await flush();
+
+    expect(sent).toEqual([ { sessionId: 1, text: '+tv The Wire', thirdPerson: false } ]);
+  });
+
+  test('{nick} and {input} can be used together', async () => {
+    const { context, sent } = createContext(INPUT_COMMANDS);
+    const item = getUserMenuItems(context).find(i => i.title === 'Slap with reason')!;
+
+    await (item.onClick as any)({ selectedIds: [ 11, 12 ], entityId: 1, permissions: [], supports: FORM, formValues: { input_1: 'too loud' } });
+    expect(sent.map(m => m.text)).toEqual([ '+slap alice too loud', '+slap bob too loud' ]);
+  });
+
+  test('nothing is sent when the input is empty or missing', async () => {
+    const { context, sent, events } = createContext(INPUT_COMMANDS);
+    const item = getUserMenuItems(context).find(i => i.title === 'TV')!;
+
+    await (item.onClick as any)({ selectedIds: [ 11 ], entityId: 1, permissions: [], supports: FORM, formValues: { input_1: '   ' } });
+    await (item.onClick as any)({ selectedIds: [ 11 ], entityId: 1, permissions: [], supports: FORM, formValues: {} });
+    await (item.onClick as any)({ selectedIds: [ 11 ], entityId: 1, permissions: [], supports: FORM, formValues: undefined });
+
+    expect(sent).toEqual([]);
+    expect(events).toHaveLength(3);
+    expect(events[0]).toContain('nothing was entered');
+  });
+
+  test('input commands work in the hub menu and {nick} ones are left out', async () => {
+    const { context, sent } = createContext(INPUT_COMMANDS);
+    const mock = createMockSocket();
+    await addContextMenuItems(mock.socket, getHubMenuItems(context), HUB_MENU_TYPE, { id: 'airdcpp-hub-commands', name: 'Hub commands' });
+
+    const list = await mock.listItems(HUB_MENU_TYPE, { selected_ids: [ 1 ], supports: FORM });
+    expect(list.menuitems.map((i: any) => i.title)).toEqual([ 'TV', 'Plain input', 'Static' ]);
+
+    const tv = list.menuitems.find((i: any) => i.title === 'TV');
+    await mock.select(HUB_MENU_TYPE, {
+      hook_id: 'airdcpp-hub-commands', menuitem_id: tv.id, selected_ids: [ 1 ], supports: FORM,
+      form_values: { input_1: 'Severance' },
+    });
+    await flush();
+
+    expect(sent).toEqual([ { sessionId: 1, text: '+tv Severance', thirdPerson: false } ]);
+  });
+});
+
+describe('several input fields', () => {
+  const COMMANDS: HubCommand[] = [
+    { name: 'Register', text: '+reg {nick} {input:username} {input:profile} ({input:Username})', placement: 'user' },
+  ];
+
+  const FORM = [ 'form' ];
+
+  test('every different label gets its own box', async () => {
+    const { context } = createContext(COMMANDS);
+    const mock = createMockSocket();
+    await addContextMenuItems(mock.socket, getUserMenuItems(context), HUB_USER_MENU_TYPE, { id: 'airdcpp-hub-commands', name: 'Hub commands' });
+
+    const list = await mock.listItems(HUB_USER_MENU_TYPE, { selected_ids: [ 11 ], entity_id: 1, supports: FORM });
+    expect(list.menuitems[0].form_definitions).toEqual([
+      { key: 'input_1', title: 'username', type: 'string', default_value: '' },
+      { key: 'input_2', title: 'profile', type: 'string', default_value: '' },
+    ]);
+  });
+
+  test('the values are inserted to their places and a repeated label shares the value', async () => {
+    const { context, sent } = createContext(COMMANDS);
+    const item = getUserMenuItems(context)[0];
+
+    await (item.onClick as any)({ selectedIds: [ 11 ], entityId: 1, permissions: [], supports: FORM, formValues: { input_1: ' bob ', input_2: 'vip' } });
+    expect(sent.map(m => m.text)).toEqual([ '+reg alice bob vip (bob)' ]);
+  });
+
+  test('nothing is sent when any of the boxes is empty', async () => {
+    const { context, sent, events } = createContext(COMMANDS);
+    const item = getUserMenuItems(context)[0];
+
+    await (item.onClick as any)({ selectedIds: [ 11 ], entityId: 1, permissions: [], supports: FORM, formValues: { input_1: 'bob', input_2: '  ' } });
+    await (item.onClick as any)({ selectedIds: [ 11 ], entityId: 1, permissions: [], supports: FORM, formValues: { input_2: 'vip' } });
+
+    expect(sent).toEqual([]);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toContain('profile');
+    expect(events[1]).toContain('username');
   });
 });
 

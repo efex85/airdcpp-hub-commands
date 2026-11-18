@@ -10,6 +10,10 @@ import { ExtensionEntryData } from 'airdcpp-extension';
 
 import { CONFIG_VERSION, migrateSettings, SettingDefinitions } from './settings';
 import { API } from './api';
+import * as path from 'path';
+
+import { COMMAND_FILE_NAME, createCommandFileIfMissing, readCommandFile, watchCommandFile } from './command-file';
+import { HubCommand, SeverityEnum } from './types';
 import { Context, getHubMenuItems, getUserMenuItems, HUB_MENU_TYPE, HUB_MENU_MIN_FEATURE_LEVEL, HUB_USER_MENU_TYPE } from './commands';
 
 
@@ -53,6 +57,11 @@ const Extension = function (socket: APISocket, extension: ExtensionEntryData) {
   });
 
   let removeListeners: (() => Promise<void>) | undefined;
+  let stopWatchingFile: (() => void) | undefined;
+
+  // Commands from the text file (the settings dialog commands are handled by the settings manager)
+  let fileCommands: HubCommand[] = [];
+  const commandFilePath = path.join(extension.configPath, COMMAND_FILE_NAME);
 
   extension.onStart = async (sessionInfo: { system_info: { api_feature_level: number } }) => {
     const featureLevel = sessionInfo.system_info.api_feature_level;
@@ -61,23 +70,59 @@ const Extension = function (socket: APISocket, extension: ExtensionEntryData) {
     const context: Context = {
       api: API(socket),
       logger: socket.logger,
-      getCommands: () => settings.getValue('commands') || [],
+      getCommands: () => [ ...(settings.getValue('commands') || []), ...fileCommands ],
     };
+
+    // Replaces the menu items with the current configuration. Reloads are run one at a time.
+    let reloadQueue: Promise<void> = Promise.resolve();
+    const reloadMenuItems = () => {
+      reloadQueue = reloadQueue.then(async () => {
+        try {
+          await removeListeners?.();
+          removeListeners = undefined;
+          removeListeners = await addMenuItems(context, socket, extension, featureLevel);
+        } catch (e) {
+          socket.logger.error(`Failed to update menu items: ${e.message}`);
+        }
+      });
+
+      return reloadQueue;
+    };
+
+    const loadFileCommands = async () => {
+      const { commands, errors } = readCommandFile(commandFilePath, socket.logger);
+      fileCommands = commands;
+      socket.logger.verbose(`Loaded ${commands.length} command(s) from ${commandFilePath}`);
+
+      for (const error of errors) {
+        socket.logger.warn(error);
+      }
+
+      if (errors.length) {
+        try {
+          await context.api.postEvent(`Hub commands: ${errors.join('; ')}`, SeverityEnum.WARNING);
+        } catch (_) {
+          // Missing permission for events, the problems have been logged already
+        }
+      }
+    };
+
+    createCommandFileIfMissing(commandFilePath, socket.logger);
+    await loadFileCommands();
 
     removeListeners = await addMenuItems(context, socket, extension, featureLevel);
 
-    settings.onValuesUpdated = async () => {
-      // Replace the menu items with the new configuration
-      try {
-        await removeListeners?.();
-        removeListeners = await addMenuItems(context, socket, extension, featureLevel);
-      } catch (e) {
-        socket.logger.error(`Failed to update menu items: ${e.message}`);
-      }
-    };
+    settings.onValuesUpdated = reloadMenuItems;
+
+    stopWatchingFile = watchCommandFile(commandFilePath, async () => {
+      await loadFileCommands();
+      await reloadMenuItems();
+    });
   };
 
   extension.onStop = async () => {
+    stopWatchingFile?.();
+
     try {
       await removeListeners?.();
     } catch (e) {
