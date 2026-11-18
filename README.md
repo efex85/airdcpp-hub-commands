@@ -7,6 +7,7 @@ Add your commands. If no hub address is set its shown in all hubs. Add adcs:// i
 Variables available:\
 {nick} - only in user list\
 {input:reason} - a text box for manual entry. You can add multiple, example: +reg nick {input:Nickname} {input:Profile}\
+
 Choose as user command (user dropdown), hub command (top hub dropdown) or both.
 
 web client daemon does not expose available hub commands so it's not possible to import whatever commands the hub has available. It's all manual work.
