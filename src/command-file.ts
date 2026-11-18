@@ -37,7 +37,11 @@ export const DEFAULT_COMMAND_FILE = `# Hub commands
 #
 # Empty lines and lines starting with # are ignored.
 # Changes are applied automatically a couple of seconds after the file has been saved.
-# These commands are shown in addition to the commands added in the extension settings.
+# The commands of this file and the commands list in the extension settings are kept in sync:
+# a command added, edited or removed in either place is updated to the other one (open the settings
+# dialog again to see the changes made here). Your comments are left as they are, but if the file has
+# a line that can't be understood, nothing is synchronized until the line is fixed.
+# The | character can't be used in a name (it is replaced with / when the command is written here).
 #
 # Examples (remove the # to use them):
 #

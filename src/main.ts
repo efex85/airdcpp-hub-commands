@@ -10,12 +10,17 @@ import { ExtensionEntryData } from 'airdcpp-extension';
 
 import { CONFIG_VERSION, migrateSettings, SettingDefinitions } from './settings';
 import { API } from './api';
+import * as fs from 'fs';
 import * as path from 'path';
 
-import { COMMAND_FILE_NAME, createCommandFileIfMissing, readCommandFile, watchCommandFile } from './command-file';
+import { COMMAND_FILE_NAME, createCommandFileIfMissing, DEFAULT_COMMAND_FILE, readCommandFile, watchCommandFile } from './command-file';
+import { haveSameCommands, mergeFileCommands, serializeCommands, unionCommands, updateFileContent } from './command-sync';
 import { HubCommand, SeverityEnum } from './types';
 import { Context, getHubMenuItems, getUserMenuItems, HUB_MENU_TYPE, HUB_MENU_MIN_FEATURE_LEVEL, HUB_USER_MENU_TYPE } from './commands';
 
+
+// How long to wait for the settings update event from the server
+const SETTINGS_UPDATE_TIMEOUT_MS = 5000;
 
 const MENU_INFO = {
   id: '',
@@ -59,18 +64,38 @@ const Extension = function (socket: APISocket, extension: ExtensionEntryData) {
   let removeListeners: (() => Promise<void>) | undefined;
   let stopWatchingFile: (() => void) | undefined;
 
-  // Commands from the text file (the settings dialog commands are handled by the settings manager)
-  let fileCommands: HubCommand[] = [];
   const commandFilePath = path.join(extension.configPath, COMMAND_FILE_NAME);
+  const configFilePath = extension.configPath + 'config.json';
+
+  const getModifiedTime = (filePath: string) => {
+    try {
+      return fs.statSync(filePath).mtimeMs;
+    } catch (_) {
+      return undefined;
+    }
+  };
 
   extension.onStart = async (sessionInfo: { system_info: { api_feature_level: number } }) => {
     const featureLevel = sessionInfo.system_info.api_feature_level;
-    await settings.load(migrateSettings);
+
+    // Check which one of the files was changed last (this must be done before the settings are loaded)
+    const configModified = getModifiedTime(configFilePath);
+    const fileExisted = fs.existsSync(commandFilePath);
+    const fileModified = getModifiedTime(commandFilePath);
+
+    // Settings saved by older versions that had no shared list with the file
+    let migrated = false;
+    await settings.load((version: number, data: any) => {
+      migrated = true;
+      return migrateSettings(version, data);
+    });
+
+    const getSettingsCommands = (): HubCommand[] => settings.getValue('commands') || [];
 
     const context: Context = {
       api: API(socket),
       logger: socket.logger,
-      getCommands: () => [ ...(settings.getValue('commands') || []), ...fileCommands ],
+      getCommands: getSettingsCommands,
     };
 
     // Replaces the menu items with the current configuration. Reloads are run one at a time.
@@ -89,34 +114,114 @@ const Extension = function (socket: APISocket, extension: ExtensionEntryData) {
       return reloadQueue;
     };
 
-    const loadFileCommands = async () => {
-      const { commands, errors } = readCommandFile(commandFilePath, socket.logger);
-      fileCommands = commands;
-      socket.logger.verbose(`Loaded ${commands.length} command(s) from ${commandFilePath}`);
-
+    const reportProblems = async (errors: string[]) => {
       for (const error of errors) {
         socket.logger.warn(error);
       }
 
-      if (errors.length) {
-        try {
-          await context.api.postEvent(`Hub commands: ${errors.join('; ')}`, SeverityEnum.WARNING);
-        } catch (_) {
-          // Missing permission for events, the problems have been logged already
-        }
+      try {
+        await context.api.postEvent(`Hub commands: ${errors.join('; ')}. The commands were not synchronized until this has been fixed.`, SeverityEnum.WARNING);
+      } catch (_) {
+        // Missing permission for events, the problems have been logged already
       }
     };
 
+    // The settings manager updates its values when the update event is received from the server,
+    // wait for that so that the new values can be used right away
+    let commandsApplied: (() => void) | undefined;
+    const setCommands = async (commands: HubCommand[]) => {
+      let timer: NodeJS.Timeout | undefined;
+      const applied = new Promise<void>(resolve => {
+        commandsApplied = resolve;
+        timer = setTimeout(resolve, SETTINGS_UPDATE_TIMEOUT_MS);
+      });
+
+      try {
+        await settings.setValue('commands', commands);
+        await applied;
+      } finally {
+        clearTimeout(timer);
+        commandsApplied = undefined;
+      }
+    };
+
+    // The commands are kept in both places. Changes are applied only when the lists differ, which also
+    // prevents the updates from triggering each other endlessly.
+
+    // Settings dialog -> file
+    const syncSettingsToFile = async () => {
+      const { commands: fileCommands, errors } = readCommandFile(commandFilePath, socket.logger);
+      if (errors.length) {
+        // Don't overwrite a file that is being edited
+        await reportProblems(errors);
+        return;
+      }
+
+      const wanted = serializeCommands(getSettingsCommands());
+      if (haveSameCommands(wanted, serializeCommands(fileCommands))) {
+        return;
+      }
+
+      let content = DEFAULT_COMMAND_FILE;
+      try {
+        content = fs.readFileSync(commandFilePath, 'utf8');
+      } catch (_) {
+        // The file has been removed, create it again
+      }
+
+      fs.writeFileSync(commandFilePath, updateFileContent(content, wanted));
+      socket.logger.verbose(`Updated ${commandFilePath} with the commands from the settings`);
+    };
+
+    // File -> settings dialog
+    const syncFileToSettings = async (merge = false) => {
+      const { commands: fileCommands, errors } = readCommandFile(commandFilePath, socket.logger);
+      if (errors.length) {
+        // The lines with errors would be lost
+        await reportProblems(errors);
+        return;
+      }
+
+      const current = getSettingsCommands();
+      const next = merge ? unionCommands(current, fileCommands) : mergeFileCommands(fileCommands, current);
+      if (haveSameCommands(serializeCommands(next), serializeCommands(current))) {
+        return;
+      }
+
+      // The menu items are reloaded when the settings update event is received
+      await setCommands(next);
+    };
+
+    settings.onValuesUpdated = (updated: { [key: string]: unknown }) => {
+      const reloaded = reloadMenuItems();
+      if (updated && 'commands' in updated) {
+        commandsApplied?.();
+        return reloaded.then(syncSettingsToFile).catch((e: Error) => {
+          socket.logger.error(`Failed to update ${COMMAND_FILE_NAME}: ${e.message}`);
+        });
+      }
+
+      return reloaded;
+    };
+
     createCommandFileIfMissing(commandFilePath, socket.logger);
-    await loadFileCommands();
 
-    removeListeners = await addMenuItems(context, socket, extension, featureLevel);
+    if (migrated) {
+      // Commands from both places are kept
+      await syncFileToSettings(true);
+      await syncSettingsToFile();
+    } else if (fileExisted && (configModified === undefined || (fileModified ?? 0) > configModified)) {
+      await syncFileToSettings();
+    } else {
+      await syncSettingsToFile();
+    }
 
-    settings.onValuesUpdated = reloadMenuItems;
+    await reloadMenuItems();
 
-    stopWatchingFile = watchCommandFile(commandFilePath, async () => {
-      await loadFileCommands();
-      await reloadMenuItems();
+    stopWatchingFile = watchCommandFile(commandFilePath, () => {
+      syncFileToSettings().catch((e: Error) => {
+        socket.logger.error(`Failed to apply the changes of ${COMMAND_FILE_NAME}: ${e.message}`);
+      });
     });
   };
 

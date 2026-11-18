@@ -34,6 +34,9 @@ const createFakeSocket = () => {
     },
     patch: async (_: string, values: any) => {
       Object.assign(settings, values);
+
+      // The server sends the event to the (already registered) listener before the request is completed
+      listeners['extensions/extension_settings_updated']?.(values);
     },
     addHook: async (module: string, event: string, cb: Function) => {
       hooks[`${module}/${event}`] = cb;
@@ -53,7 +56,7 @@ const createFakeSocket = () => {
     );
   });
 
-  return { socket, hooks, listeners, removed, posted, listItems };
+  return { socket, hooks, listeners, removed, posted, listItems, settings };
 };
 
 const waitFor = async (condition: () => Promise<boolean> | boolean, timeoutMs = 8000) => {
@@ -68,63 +71,96 @@ const waitFor = async (condition: () => Promise<boolean> | boolean, timeoutMs = 
 };
 
 
+const writeFile = (file: string, content: string) => fs.writeFileSync(file, content);
+
 describe('extension', () => {
-  jest.setTimeout(20000);
+  jest.setTimeout(30000);
 
-  test('starts with the saved settings, loads the command file, applies its changes and stops cleanly', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-commands-main-')) + path.sep;
+  const HUB_A = 'adcs://hub-a.example.com:1511';
 
-    // Settings saved by an earlier version
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-      version: 1,
-      settings: { commands: [ { hub_url: 'hub-a.example.com', name: 'Old command', text: '+old' } ] },
-    }));
+  const createDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'hub-commands-main-')) + path.sep;
 
+  const start = async (dir: string, featureLevel = 9) => {
     const fake = createFakeSocket();
     const extension: any = { name: 'airdcpp-hub-commands', configPath: dir };
     Extension(fake.socket, extension);
 
-    await extension.onStart({ system_info: { api_feature_level: 9 } });
-
-    // The instructions file has been created
-    expect(fs.readFileSync(path.join(dir, COMMAND_FILE_NAME), 'utf8')).toBe(DEFAULT_COMMAND_FILE);
-
-    // The old command has been migrated and it is shown in both menus
-    const migrated = await fake.socket.get('extensions/airdcpp-hub-commands/settings');
-    expect(migrated.commands).toEqual([ { hub_url: 'hub-a.example.com', name: 'Old command', text: '+old', more_hubs: null, placement: 'both' } ]);
-    expect(CONFIG_VERSION).toBe(3);
-
-    // Menus for the hub user list and the hub are both registered
-    expect(Object.keys(fake.hooks).sort()).toEqual([ 'menus/hub_list_menuitems', 'menus/hub_user_list_menuitems' ]);
+    await extension.onStart({ system_info: { api_feature_level: featureLevel } });
 
     // (the hub address is matched by the hub URL lookup)
     fake.socket.get = (async (url: string) => {
       if (url === 'hubs/1') {
-        return { id: 1, hub_url: 'adcs://hub-a.example.com:1511' };
+        return { id: 1, hub_url: HUB_A };
+      }
+
+      if (url.endsWith('/settings')) {
+        return { ...fake.settings };
       }
 
       throw new Error(`Unexpected GET ${url}`);
     }) as any;
 
     const titles = async () => (await fake.listItems('hub_user', { selected_ids: [ 11 ], entity_id: 1 })).menuitems.map((i: any) => i.title);
-    expect(await titles()).toEqual([ 'Old command' ]);
+    const names = () => (fake.settings.commands as any[]).map(c => c.name);
+    return { fake, extension, titles, names };
+  };
 
-    // Add a command to the file, it should be picked up automatically
-    fs.writeFileSync(path.join(dir, COMMAND_FILE_NAME), 'From file | hub-a.example.com | user | +file\nBroken line\n');
-    await waitFor(async () => (await titles()).includes('From file'));
+  test('commands are synchronized between the settings and the file', async () => {
+    const dir = createDir();
+    const file = path.join(dir, COMMAND_FILE_NAME);
+
+    // Settings saved by an earlier version, and a file with another command
+    writeFile(path.join(dir, 'config.json'), JSON.stringify({
+      version: 1,
+      settings: { commands: [ { hub_url: 'hub-a.example.com', name: 'Old command', text: '+old' } ] },
+    }));
+    writeFile(file, '# my notes\nFrom file | hub-a.example.com | user | +file\n');
+
+    const { fake, extension, titles, names } = await start(dir);
+    expect(CONFIG_VERSION).toBe(4);
+
+    // Both commands are in both places, the migrated command is shown in both menus
+    expect(names()).toEqual([ 'Old command', 'From file' ]);
+    expect(fake.settings.commands[0]).toEqual({ hub_url: 'hub-a.example.com', name: 'Old command', text: '+old', more_hubs: null, placement: 'both' });
+    expect(fs.readFileSync(file, 'utf8')).toBe('# my notes\nFrom file | hub-a.example.com | user | +file\nOld command | hub-a.example.com | both | +old\n');
+
+    // Menus for the hub user list and the hub are both registered
+    expect(Object.keys(fake.hooks).sort()).toEqual([ 'menus/hub_list_menuitems', 'menus/hub_user_list_menuitems' ]);
     expect(await titles()).toEqual([ 'Old command', 'From file' ]);
 
-    // The previous menu items were removed (user menu + hub menu) before adding the new ones
-    expect(fake.removed.filter(r => r === 'hook:hub_user_list_menuitems').length).toBeGreaterThanOrEqual(1);
+    // Delete a command in the settings dialog
+    await fake.socket.patch('extensions/airdcpp-hub-commands/settings', { commands: [ fake.settings.commands[1] ] });
+    await waitFor(() => !fs.readFileSync(file, 'utf8').includes('Old command'));
+    expect(fs.readFileSync(file, 'utf8')).toBe('# my notes\nFrom file | hub-a.example.com | user | +file\n');
+    expect(await titles()).toEqual([ 'From file' ]);
 
-    // The broken line is reported
-    const event = fake.posted.find(p => p.path === 'events');
-    expect(event?.data.text).toContain('line 2');
+    // Add a command in the settings dialog
+    await fake.socket.patch('extensions/airdcpp-hub-commands/settings', {
+      commands: [ ...fake.settings.commands, { name: 'From dialog', text: '+dialog', placement: 'hub', hub_url: null, more_hubs: null, third_person: false, icon: null } ],
+    });
+    await waitFor(() => fs.readFileSync(file, 'utf8').includes('From dialog'));
+    expect(fs.readFileSync(file, 'utf8')).toContain('From dialog | any | hub | +dialog');
 
-    // Edit the file again: remove the command
-    fs.writeFileSync(path.join(dir, COMMAND_FILE_NAME), '# nothing here\n');
-    await waitFor(async () => !(await titles()).includes('From file'));
-    expect(await titles()).toEqual([ 'Old command' ]);
+    // Edit the file: remove one command and add another
+    writeFile(file, '# my notes\nFrom dialog | any | hub | +dialog\nAdded in file | hub-a.example.com | both | /me waves\n');
+    await waitFor(() => names().includes('Added in file'));
+    expect(names()).toEqual([ 'From dialog', 'Added in file' ]);
+    expect(fake.settings.commands[1]).toMatchObject({ text: 'waves', third_person: true, placement: 'both' });
+    await waitFor(async () => (await titles()).includes('Added in file'));
+
+    // The file is left as it was written by the user (nothing to write back)
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    expect(fs.readFileSync(file, 'utf8')).toBe('# my notes\nFrom dialog | any | hub | +dialog\nAdded in file | hub-a.example.com | both | /me waves\n');
+
+    // A file with a broken line changes nothing and the file is not overwritten
+    const broken = '# my notes\nOnly | any | user | +only\nBroken line\n';
+    writeFile(file, broken);
+    await waitFor(() => fake.posted.some(p => p.path === 'events' && p.data.text.includes('line 3')));
+    expect(names()).toEqual([ 'From dialog', 'Added in file' ]);
+
+    await fake.socket.patch('extensions/airdcpp-hub-commands/settings', { commands: [ fake.settings.commands[0] ] });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    expect(fs.readFileSync(file, 'utf8')).toBe(broken);
 
     // Stopping removes the menu items
     fake.removed.length = 0;
@@ -135,13 +171,55 @@ describe('extension', () => {
     ]);
   });
 
-  test('works without the hub menu on older API versions', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-commands-main-')) + path.sep;
-    const fake = createFakeSocket();
-    const extension: any = { name: 'airdcpp-hub-commands', configPath: dir };
-    Extension(fake.socket, extension);
+  test('the file wins on startup when it was edited after the settings were saved', async () => {
+    const dir = createDir();
+    const file = path.join(dir, COMMAND_FILE_NAME);
 
-    await extension.onStart({ system_info: { api_feature_level: 5 } });
+    writeFile(path.join(dir, 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION,
+      settings: { commands: [ { name: 'In settings', text: '+s', placement: 'user', hub_url: null, more_hubs: null, third_person: false, icon: null } ] },
+    }));
+    writeFile(file, 'In file | any | user | +f\n');
+
+    const past = new Date(Date.now() - 60000);
+    fs.utimesSync(path.join(dir, 'config.json'), past, past);
+
+    const { extension, names } = await start(dir);
+    expect(names()).toEqual([ 'In file' ]);
+    await extension.onStop();
+  });
+
+  test('the settings win on startup when they were saved after the file was edited', async () => {
+    const dir = createDir();
+    const file = path.join(dir, COMMAND_FILE_NAME);
+
+    writeFile(file, '# notes\nIn file | any | user | +f\n');
+    writeFile(path.join(dir, 'config.json'), JSON.stringify({
+      version: CONFIG_VERSION,
+      settings: { commands: [ { name: 'In settings', text: '+s', placement: 'user', hub_url: null, more_hubs: null, third_person: false, icon: null } ] },
+    }));
+
+    const past = new Date(Date.now() - 60000);
+    fs.utimesSync(file, past, past);
+
+    const { extension, names } = await start(dir);
+    expect(names()).toEqual([ 'In settings' ]);
+    expect(fs.readFileSync(file, 'utf8')).toBe('# notes\nIn settings | any | user | +s\n');
+    await extension.onStop();
+  });
+
+  test('a new installation creates the instructions file', async () => {
+    const dir = createDir();
+    const { extension, names } = await start(dir);
+
+    expect(fs.readFileSync(path.join(dir, COMMAND_FILE_NAME), 'utf8')).toBe(DEFAULT_COMMAND_FILE);
+    expect(names()).toEqual([]);
+    await extension.onStop();
+  });
+
+  test('works without the hub menu on older API versions', async () => {
+    const dir = createDir();
+    const { fake, extension } = await start(dir, 5);
     expect(Object.keys(fake.hooks)).toEqual([ 'menus/hub_user_list_menuitems' ]);
 
     await extension.onStop();
