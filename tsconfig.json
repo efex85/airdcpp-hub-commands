@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "outDir": "build/dist",
+    "module": "ESNext",
+    "target": "es2020",
+    "lib": ["dom", "es2020"],
+    "sourceMap": true,
+    "moduleResolution": "bundler",
+    "rootDir": "src",
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitReturns": true,
+    "noImplicitThis": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noUnusedLocals": true,
+    "baseUrl": ".",
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true
+  },
+  "exclude": [
+    "coverage",
+    "devtools",
+    "dist",
+    "node_modules",
+  ]
+}
