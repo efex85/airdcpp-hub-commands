@@ -4,6 +4,7 @@ Quick install:  AirDC web client > Settings > Extensions > Extension catalog > I
 
 Add your commands. If no hub address is set its shown in all hubs. Add adcs:// if its a adc hub. Port or kp not needed.
 OVariables available:
+
 {nick} - only in user list
 [input:reason} - a text box for manual entry
 Choose as user command (user dropdown), hub command (top hub dropdown) or both.
