@@ -8,7 +8,7 @@ Variables available:\
 {nick} - only in user list\
 {input:reason} - a text box for manual entry. You can add multiple, example: +reg nick {input:Nickname} {input:Profile}\
 {input:reason=value1,value2} - ceeates a dropdown with preset values, example: +reg nick {input:Nickname} {input:Profile=20,30,40} {input:Comment?}\
-To make a Input:comment box optinal, add "?" as the example above.
+To make a Input:reason box optinal, add "?" as the example above.
 
 Choose as user command (user dropdown), hub command (top hub dropdown) or both.
 
