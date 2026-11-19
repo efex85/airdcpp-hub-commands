@@ -120,8 +120,8 @@ describe('hub URL matching', () => {
     expect(match('hub-a.example', HUB_A)).toBe(false);
 
     // IP addresses
-    expect(match('10.0.20.105', 'adcs://10.0.20.105:13330/?kp=SHA256/ABC')).toBe(true);
-    expect(match('10.0.20.10', 'adcs://10.0.20.105:13330')).toBe(false);
+    expect(match('192.0.2.105', 'adcs://192.0.2.105:13330/?kp=SHA256/ABC')).toBe(true);
+    expect(match('192.0.2.10', 'adcs://192.0.2.105:13330')).toBe(false);
     expect(match('[::1]', 'adcs://[::1]:5600')).toBe(true);
   });
 
@@ -522,6 +522,63 @@ describe('input fields with preset values', () => {
     expect(sent).toHaveLength(1);
     expect(events).toHaveLength(1);
     expect(events[0]).toContain('"40" is not one of the values');
+  });
+});
+
+describe('optional input fields', () => {
+  const COMMANDS: HubCommand[] = [
+    { name: 'Register', text: '+reg {input:Username} {input:Profile=20,30} {input:Comment?}', placement: 'hub' },
+    { name: 'Middle', text: '+a {input:Mid?} end', placement: 'hub' },
+  ];
+
+  const FORM = [ 'form' ];
+
+  test('variable parsing', () => {
+    expect(getInputFields(COMMANDS[0])).toEqual([
+      { key: 'input_1', label: 'Username' },
+      { key: 'input_2', label: 'Profile', options: [ '20', '30' ] },
+      { key: 'input_3', label: 'Comment', optional: true },
+    ]);
+
+    // Any variable of the label can mark it as optional, boxes with options are never optional
+    expect(getInputFields({ name: 'a', text: '{input:A} {input:a ?}' })).toEqual([ { key: 'input_1', label: 'A', optional: true } ]);
+    expect(getInputFields({ name: 'a', text: '{input:A?=x,y}' })).toEqual([ { key: 'input_1', label: 'A', options: [ 'x', 'y' ] } ]);
+    expect(getInputFields({ name: 'a', text: '{input:?}' })).toEqual([ { key: 'input_1', label: 'Input', optional: true } ]);
+  });
+
+  test('the form field is optional and has no default value', async () => {
+    const { context } = createContext(COMMANDS);
+    const mock = createMockSocket();
+    await addContextMenuItems(mock.socket, getHubMenuItems(context), HUB_MENU_TYPE, { id: 'airdcpp-hub-commands', name: 'Hub commands' });
+
+    const list = await mock.listItems(HUB_MENU_TYPE, { selected_ids: [ 1 ], supports: FORM });
+    expect(list.menuitems[0].form_definitions[2]).toEqual({ key: 'input_3', title: 'Comment', type: 'string', optional: true });
+  });
+
+  test('an empty value removes the variable and the space before it', async () => {
+    const { context, sent, events } = createContext(COMMANDS);
+    const [ register, middle ] = getHubMenuItems(context);
+
+    await (register.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: 'bob', input_2: '30', input_3: '  ' } });
+    await (register.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: 'bob', input_2: '20' } });
+    await (register.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: 'bob', input_2: '20', input_3: null } });
+    await (register.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: 'bob', input_2: '20', input_3: 'nice one' } });
+    await (middle.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: '' } });
+    await (middle.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: 'x' } });
+
+    expect(sent.map(m => m.text)).toEqual([
+      '+reg bob 30', '+reg bob 20', '+reg bob 20', '+reg bob 20 nice one', '+a end', '+a x end',
+    ]);
+    expect(events).toEqual([]);
+  });
+
+  test('required boxes are still required', async () => {
+    const { context, sent, events } = createContext(COMMANDS);
+    const [ register ] = getHubMenuItems(context);
+
+    await (register.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: '', input_2: '20' } });
+    expect(sent).toEqual([]);
+    expect(events[0]).toContain('"Username"');
   });
 });
 

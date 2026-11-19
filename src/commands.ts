@@ -22,8 +22,10 @@ const NICK_VARIABLE = '{nick}';
 //   {input}             text that is asked from the user when the command is selected
 //   {input:Show name}   same as above but the input box is labeled with the given text
 //   {input:Profile=20,30}  a selection box with the given values instead of a text box (the first one is preselected)
+//   {input:Comment?}    the box can be left empty (the variable is then removed from the message)
 // Every different label gets its own input box (the same label used again reuses the same box)
-const VARIABLE_REGEX = /\{nick\}|\{input(?::[^}]*)?\}/g;
+// The whitespace before the variable is captured so that it can be removed together with an empty optional value
+const VARIABLE_REGEX = /(\s*)(\{nick\}|\{input(?::[^}]*)?\})/g;
 const INPUT_VARIABLE_REGEX = /\{input(?::([^}]*))?\}/g;
 
 export const DEFAULT_INPUT_LABEL = 'Input';
@@ -37,38 +39,60 @@ export interface InputField {
   label: string;
   // Values to select from (a free text box is shown when missing)
   options?: string[];
+  // The box can be left empty (not possible for boxes with options, those always have a value selected)
+  optional?: boolean;
 }
 
-// Splits the contents of the variable ("Profile=20,30") to the label and the possible options
+// Splits the contents of the variable ("Profile=20,30" or "Comment?") to the label and the other parts
 const parseVariable = (variable: string) => {
   const match = /^\{input(?::([^}]*))?\}$/.exec(variable);
   const content = (match && match[1]) || '';
   const separator = content.indexOf('=');
 
-  const label = (separator === -1 ? content : content.slice(0, separator)).trim() || DEFAULT_INPUT_LABEL;
+  let label = (separator === -1 ? content : content.slice(0, separator)).trim();
+  const optional = label.endsWith('?');
+  if (optional) {
+    label = label.slice(0, -1).trim();
+  }
+
   const options = separator === -1 ? [] : content
     .slice(separator + 1)
     .split(',')
     .map(option => option.trim())
     .filter((option, index, all) => !!option && all.indexOf(option) === index);
 
-  return { label, options };
+  return { label: label || DEFAULT_INPUT_LABEL, options, optional };
 };
 
 const getVariableLabel = (variable: string) => parseVariable(variable).label;
 
 // Distinct input labels in the order they first appear in the text (labels are not case sensitive).
-// The options are taken from the first variable of the label that has them.
+// The options are taken from the first variable of the label that has them and the box is optional
+// when any of the variables of the label is marked as optional.
 export const getInputFields = (command: HubCommand): InputField[] => {
   const fields: InputField[] = [];
 
   for (const match of command.text.matchAll(INPUT_VARIABLE_REGEX)) {
-    const { label, options } = parseVariable(match[0]);
-    const existing = fields.find(field => field.label.toLowerCase() === label.toLowerCase());
-    if (!existing) {
-      fields.push({ key: `${INPUT_FORM_KEY_PREFIX}${fields.length + 1}`, label, ...(options.length ? { options } : {}) });
-    } else if (!existing.options && options.length) {
-      existing.options = options;
+    const { label, options, optional } = parseVariable(match[0]);
+    let field = fields.find(item => item.label.toLowerCase() === label.toLowerCase());
+    if (!field) {
+      field = { key: `${INPUT_FORM_KEY_PREFIX}${fields.length + 1}`, label };
+      fields.push(field);
+    }
+
+    if (!field.options && options.length) {
+      field.options = options;
+    }
+
+    if (optional) {
+      field.optional = true;
+    }
+  }
+
+  // Boxes with options have a value selected
+  for (const field of fields) {
+    if (field.options) {
+      delete field.optional;
     }
   }
 
@@ -80,12 +104,17 @@ export const hasInputVariable = (command: HubCommand) => getInputFields(command)
 // Variables are replaced in a single pass so that the replacement values can't be treated as variables
 // The inputs are given by the lower case label
 export const renderText = (text: string, values: { nick?: string, inputs?: { [label: string]: string } }) => {
-  return text.replace(VARIABLE_REGEX, match => {
-    const value = match === NICK_VARIABLE
+  return text.replace(VARIABLE_REGEX, (match, whitespace: string, variable: string) => {
+    const value = variable === NICK_VARIABLE
       ? values.nick
-      : values.inputs?.[getVariableLabel(match).toLowerCase()];
+      : values.inputs?.[getVariableLabel(variable).toLowerCase()];
 
-    return value !== undefined ? value : match;
+    if (value === undefined) {
+      return match;
+    }
+
+    // An empty optional value removes the variable with the whitespace before it
+    return value === '' ? '' : whitespace + value;
   });
 };
 
@@ -214,6 +243,11 @@ const sendCommand = async (context: Context, command: HubCommand, sessionId: num
       for (const field of fields) {
         const value = formValues ? formValues[field.key] : undefined;
         const text = typeof value === 'string' ? value.trim() : '';
+        if (!text && field.optional) {
+          inputs[field.label.toLowerCase()] = '';
+          continue;
+        }
+
         if (!text) {
           await api.postEvent(`Hub commands: nothing was entered for "${field.label}" in "${command.name}", the command was not sent`, SeverityEnum.WARNING);
           return;
@@ -272,8 +306,10 @@ const getItemBase = (context: Context, command: HubCommand, index: number) => ({
       key: field.key,
       title: field.label,
       type: 'string',
-      // The default value must be one of the options
-      default_value: field.options ? field.options[0] : '',
+      ...(field.optional ? { optional: true } : {
+        // The default value must be one of the options
+        default_value: field.options ? field.options[0] : '',
+      }),
       ...(field.options ? { options: field.options.map(option => ({ id: option, name: option })) } : {}),
     })),
   } : {}),

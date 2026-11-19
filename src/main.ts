@@ -148,6 +148,9 @@ const Extension = function (socket: APISocket, extension: ExtensionEntryData) {
     // The commands are kept in both places. Changes are applied only when the lists differ, which also
     // prevents the updates from triggering each other endlessly.
 
+    // The failure is reported only once until the file can be written again
+    let writeFailureReported = false;
+
     // Settings dialog -> file
     const syncSettingsToFile = async () => {
       const { commands: fileCommands, errors } = readCommandFile(commandFilePath, socket.logger);
@@ -169,7 +172,28 @@ const Extension = function (socket: APISocket, extension: ExtensionEntryData) {
         // The file has been removed, create it again
       }
 
-      fs.writeFileSync(commandFilePath, updateFileContent(content, wanted));
+      try {
+        fs.writeFileSync(commandFilePath, updateFileContent(content, wanted));
+      } catch (e) {
+        // The commands still work from the settings, so this must never stop the extension
+        socket.logger.error(`Failed to write ${commandFilePath}: ${e.message}`);
+        if (!writeFailureReported) {
+          writeFailureReported = true;
+          try {
+            await context.api.postEvent(
+              `Hub commands: ${COMMAND_FILE_NAME} can't be updated (${e.code || e.message}). The commands in the settings keep working, but changes are not written to the file. ` +
+              `The file must be writable by the user that runs AirDC++ (${commandFilePath}).`,
+              SeverityEnum.WARNING
+            );
+          } catch (_) {
+            // Missing permission for events, the problem has been logged already
+          }
+        }
+
+        return;
+      }
+
+      writeFailureReported = false;
       socket.logger.verbose(`Updated ${commandFilePath} with the commands from the settings`);
     };
 
@@ -206,14 +230,19 @@ const Extension = function (socket: APISocket, extension: ExtensionEntryData) {
 
     createCommandFileIfMissing(commandFilePath, socket.logger);
 
-    if (migrated) {
-      // Commands from both places are kept
-      await syncFileToSettings(true);
-      await syncSettingsToFile();
-    } else if (fileExisted && (configModified === undefined || (fileModified ?? 0) > configModified)) {
-      await syncFileToSettings();
-    } else {
-      await syncSettingsToFile();
+    try {
+      if (migrated) {
+        // Commands from both places are kept
+        await syncFileToSettings(true);
+        await syncSettingsToFile();
+      } else if (fileExisted && (configModified === undefined || (fileModified ?? 0) > configModified)) {
+        await syncFileToSettings();
+      } else {
+        await syncSettingsToFile();
+      }
+    } catch (e) {
+      // The menus must be available even if the file can't be used
+      socket.logger.error(`Failed to synchronize the commands with ${COMMAND_FILE_NAME}: ${e.message}`);
     }
 
     await reloadMenuItems();

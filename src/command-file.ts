@@ -34,6 +34,7 @@ export const DEFAULT_COMMAND_FILE = `# Hub commands
 #                                  Several different labels give several boxes, e.g.
 #                                  +reg {nick} {input:Username} {input:Profile}
 #               {input:Profile=20,30}  a selection box with the given values (the first one is preselected)
+#               {input:Comment?}   a box that can be left empty (the variable is then left out of the message)
 #             Start the message with /me to send it as a third person message.
 #
 # Empty lines and lines starting with # are ignored.

@@ -235,6 +235,49 @@ describe('extension', () => {
     await second.extension.onStop();
   });
 
+  test('the extension keeps working when the command file can\'t be written', async () => {
+    const dir = createDir();
+    const file = path.join(dir, COMMAND_FILE_NAME);
+    const command = (name: string) => ({ name, text: `+${name}`, placement: 'user', hub_url: null, more_hubs: null, third_person: false, icon: null });
+
+    writeFile(file, '# nothing here\n');
+    writeFile(path.join(dir, 'config.json'), JSON.stringify({ version: CONFIG_VERSION, settings: { commands: [ command('A') ] } }));
+
+    const past = new Date(Date.now() - 60000);
+    fs.utimesSync(file, past, past);
+
+    // The imported namespace is read-only, the module itself is patched
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const realFs = require('fs');
+    const original = realFs.writeFileSync;
+    const spy = jest.spyOn(realFs, 'writeFileSync').mockImplementation(((target: any, ...args: any[]) => {
+      if (String(target).endsWith(COMMAND_FILE_NAME)) {
+        throw Object.assign(new Error(`EACCES: permission denied, open '${target}'`), { code: 'EACCES' });
+      }
+
+      return (original as any)(target, ...args);
+    }) as any);
+
+    try {
+      const { fake, extension, titles, names } = await start(dir);
+      expect(names()).toEqual([ 'A' ]);
+      expect(await titles()).toEqual([ 'A' ]);
+
+      // Changes made later are not written either, but the failure is reported only once
+      await fake.socket.patch('extensions/airdcpp-hub-commands/settings', { commands: [ command('A'), command('B') ] });
+      await waitFor(async () => (await titles()).includes('B'));
+
+      const reports = fake.posted.filter(p => p.path === 'events' && p.data.text.includes("can't be updated"));
+      expect(reports).toHaveLength(1);
+      expect(reports[0].data.text).toContain('EACCES');
+      expect(fs.readFileSync(file, 'utf8')).toBe('# nothing here\n');
+
+      await extension.onStop();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('a new installation creates the instructions file', async () => {
     const dir = createDir();
     const { extension, names } = await start(dir);
