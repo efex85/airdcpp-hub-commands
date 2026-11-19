@@ -475,6 +475,56 @@ describe('several input fields', () => {
   });
 });
 
+describe('input fields with preset values', () => {
+  const COMMANDS: HubCommand[] = [
+    { name: 'Register', text: '+reg {input:Username} {input:Profile=20, 30,20} / {input:profile}', placement: 'hub' },
+  ];
+
+  const FORM = [ 'form' ];
+
+  test('variable parsing', () => {
+    expect(getInputFields(COMMANDS[0])).toEqual([
+      { key: 'input_1', label: 'Username' },
+      { key: 'input_2', label: 'Profile', options: [ '20', '30' ] },
+    ]);
+
+    // Options given later are used when the first one has none
+    expect(getInputFields({ name: 'a', text: '{input:A} {input:a=x,y}' })).toEqual([ { key: 'input_1', label: 'A', options: [ 'x', 'y' ] } ]);
+    expect(getInputFields({ name: 'a', text: '{input:=x,y} {input:Z=}' })).toEqual([
+      { key: 'input_1', label: 'Input', options: [ 'x', 'y' ] },
+      { key: 'input_2', label: 'Z' },
+    ]);
+  });
+
+  test('the menu item has a selection box with the first value preselected', async () => {
+    const { context } = createContext(COMMANDS);
+    const mock = createMockSocket();
+    await addContextMenuItems(mock.socket, getHubMenuItems(context), HUB_MENU_TYPE, { id: 'airdcpp-hub-commands', name: 'Hub commands' });
+
+    const list = await mock.listItems(HUB_MENU_TYPE, { selected_ids: [ 1 ], supports: FORM });
+    expect(list.menuitems[0].form_definitions).toEqual([
+      { key: 'input_1', title: 'Username', type: 'string', default_value: '' },
+      {
+        key: 'input_2', title: 'Profile', type: 'string', default_value: '20',
+        options: [ { id: '20', name: '20' }, { id: '30', name: '30' } ],
+      },
+    ]);
+  });
+
+  test('the selected value is inserted, other values are rejected', async () => {
+    const { context, sent, events } = createContext(COMMANDS);
+    const item = getHubMenuItems(context)[0];
+
+    await (item.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: 'bob', input_2: '30' } });
+    expect(sent.map(m => m.text)).toEqual([ '+reg bob 30 / 30' ]);
+
+    await (item.onClick as any)({ selectedIds: [ 1 ], permissions: [], supports: FORM, formValues: { input_1: 'bob', input_2: '40' } });
+    expect(sent).toHaveLength(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toContain('"40" is not one of the values');
+  });
+});
+
 describe('placement', () => {
   const PLACEMENT_COMMANDS: HubCommand[] = [
     { name: 'User only', text: '+user', placement: 'user' },

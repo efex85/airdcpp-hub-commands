@@ -208,6 +208,33 @@ describe('extension', () => {
     await extension.onStop();
   });
 
+  test('the order set in the settings dialog is kept after a restart and the file order is not touched', async () => {
+    const dir = createDir();
+    const file = path.join(dir, COMMAND_FILE_NAME);
+    const command = (name: string) => ({ name, text: `+${name}`, placement: 'user', hub_url: null, more_hubs: null, third_person: false, icon: null });
+
+    writeFile(path.join(dir, 'config.json'), JSON.stringify({ version: CONFIG_VERSION, settings: { commands: [ command('A'), command('B') ] } }));
+    const first = await start(dir);
+    expect(first.names()).toEqual([ 'A', 'B' ]);
+    const written = fs.readFileSync(file, 'utf8');
+
+    // Add a command and move it to the top
+    await first.fake.socket.patch('extensions/airdcpp-hub-commands/settings', { commands: [ command('C'), command('A'), command('B') ] });
+    await waitFor(() => fs.readFileSync(file, 'utf8').includes('| +C'));
+    expect(fs.readFileSync(file, 'utf8').trim().split('\n').filter(l => l.includes('|') && !l.startsWith('#')).map(l => l.split(' | ')[0]))
+      .toEqual([ 'A', 'B', 'C' ]);
+    expect(written).toBeTruthy();
+    await first.extension.onStop();
+
+    // Restart with the saved files (the settings manager has written config.json)
+    await waitFor(() => (JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).settings.commands || []).length === 3);
+    const second = await start(dir);
+    expect(second.names()).toEqual([ 'C', 'A', 'B' ]);
+    expect(fs.readFileSync(file, 'utf8').trim().split('\n').filter(l => l.includes('|') && !l.startsWith('#')).map(l => l.split(' | ')[0]))
+      .toEqual([ 'A', 'B', 'C' ]);
+    await second.extension.onStop();
+  });
+
   test('a new installation creates the instructions file', async () => {
     const dir = createDir();
     const { extension, names } = await start(dir);

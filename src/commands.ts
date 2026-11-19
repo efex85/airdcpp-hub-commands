@@ -21,6 +21,7 @@ const NICK_VARIABLE = '{nick}';
 //   {nick}              nick of the selected user (user menus only)
 //   {input}             text that is asked from the user when the command is selected
 //   {input:Show name}   same as above but the input box is labeled with the given text
+//   {input:Profile=20,30}  a selection box with the given values instead of a text box (the first one is preselected)
 // Every different label gets its own input box (the same label used again reuses the same box)
 const VARIABLE_REGEX = /\{nick\}|\{input(?::[^}]*)?\}/g;
 const INPUT_VARIABLE_REGEX = /\{input(?::([^}]*))?\}/g;
@@ -34,24 +35,40 @@ const FORM_SUPPORT = 'form';
 export interface InputField {
   key: string;
   label: string;
+  // Values to select from (a free text box is shown when missing)
+  options?: string[];
 }
 
-const getVariableLabel = (variable: string) => {
+// Splits the contents of the variable ("Profile=20,30") to the label and the possible options
+const parseVariable = (variable: string) => {
   const match = /^\{input(?::([^}]*))?\}$/.exec(variable);
-  return (match && match[1] && match[1].trim()) || DEFAULT_INPUT_LABEL;
+  const content = (match && match[1]) || '';
+  const separator = content.indexOf('=');
+
+  const label = (separator === -1 ? content : content.slice(0, separator)).trim() || DEFAULT_INPUT_LABEL;
+  const options = separator === -1 ? [] : content
+    .slice(separator + 1)
+    .split(',')
+    .map(option => option.trim())
+    .filter((option, index, all) => !!option && all.indexOf(option) === index);
+
+  return { label, options };
 };
 
-// Distinct input labels in the order they first appear in the text (labels are not case sensitive)
+const getVariableLabel = (variable: string) => parseVariable(variable).label;
+
+// Distinct input labels in the order they first appear in the text (labels are not case sensitive).
+// The options are taken from the first variable of the label that has them.
 export const getInputFields = (command: HubCommand): InputField[] => {
   const fields: InputField[] = [];
-  const seen = new Set<string>();
 
   for (const match of command.text.matchAll(INPUT_VARIABLE_REGEX)) {
-    const label = getVariableLabel(match[0]);
-    const id = label.toLowerCase();
-    if (!seen.has(id)) {
-      seen.add(id);
-      fields.push({ key: `${INPUT_FORM_KEY_PREFIX}${fields.length + 1}`, label });
+    const { label, options } = parseVariable(match[0]);
+    const existing = fields.find(field => field.label.toLowerCase() === label.toLowerCase());
+    if (!existing) {
+      fields.push({ key: `${INPUT_FORM_KEY_PREFIX}${fields.length + 1}`, label, ...(options.length ? { options } : {}) });
+    } else if (!existing.options && options.length) {
+      existing.options = options;
     }
   }
 
@@ -202,6 +219,11 @@ const sendCommand = async (context: Context, command: HubCommand, sessionId: num
           return;
         }
 
+        if (field.options && !field.options.includes(text)) {
+          await api.postEvent(`Hub commands: "${text}" is not one of the values of "${field.label}" in "${command.name}", the command was not sent`, SeverityEnum.WARNING);
+          return;
+        }
+
         inputs[field.label.toLowerCase()] = text;
       }
     }
@@ -250,7 +272,9 @@ const getItemBase = (context: Context, command: HubCommand, index: number) => ({
       key: field.key,
       title: field.label,
       type: 'string',
-      default_value: '',
+      // The default value must be one of the options
+      default_value: field.options ? field.options[0] : '',
+      ...(field.options ? { options: field.options.map(option => ({ id: option, name: option })) } : {}),
     })),
   } : {}),
 });
