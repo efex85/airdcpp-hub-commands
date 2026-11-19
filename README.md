@@ -7,7 +7,7 @@ Add your commands. If no hub address is set its shown in all hubs. Add adcs:// i
 Variables available:\
 {nick} - only in user list\
 {input:reason} - a text box for manual entry. You can add multiple, example: +reg nick {input:Nickname} {input:Profile}\
-{input:reason=value1,value2} - ceeates a dropdown with preset values, example: +reg nick {input:Nickname} {input:Profile=20,30,40} {input:Comment?}\
+{input:reason=value1,value2} - creates a dropdown with preset values, example: +reg nick {input:Nickname} {input:Profile=20,30,40} {input:Comment?}\
 To make a Input:reason box optinal, add "?" as the example above.
 
 Choose as user command (user dropdown), hub command (top hub dropdown) or both.
