@@ -4,7 +4,7 @@ import * as path from 'path';
 
 import Extension from '../main';
 import { COMMAND_FILE_NAME, DEFAULT_COMMAND_FILE } from '../command-file';
-import { CONFIG_VERSION } from '../settings';
+import { CONFIG_VERSION, SettingDefinitions } from '../settings';
 
 
 // Fake of the API socket that behaves like the extension manager for the calls used by the extension
@@ -276,6 +276,31 @@ describe('extension', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test('the command list can be emptied', async () => {
+    // The server refuses to save an empty list unless the list is optional
+    expect(SettingDefinitions.find(def => def.key === 'commands')).toMatchObject({ type: 'list', optional: true });
+
+    const dir = createDir();
+    const file = path.join(dir, COMMAND_FILE_NAME);
+    const command = (name: string) => ({ name, text: `+${name}`, placement: 'user', hub_url: null, more_hubs: null, third_person: false, icon: null });
+
+    writeFile(path.join(dir, 'config.json'), JSON.stringify({ version: CONFIG_VERSION, settings: { commands: [ command('A') ] } }));
+    const { fake, extension, titles } = await start(dir);
+    expect(fs.readFileSync(file, 'utf8')).toContain('A | any | user | +A');
+
+    // The dialog may save an empty list as null as well
+    for (const empty of [ [], null ]) {
+      await fake.socket.patch('extensions/airdcpp-hub-commands/settings', { commands: [ command('A') ] });
+      await waitFor(async () => (await titles()).includes('A'));
+
+      await fake.socket.patch('extensions/airdcpp-hub-commands/settings', { commands: empty });
+      await waitFor(async () => !(await titles()).includes('A'));
+      await waitFor(() => !fs.readFileSync(file, 'utf8').includes('| +A'));
+    }
+
+    await extension.onStop();
   });
 
   test('a new installation creates the instructions file', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "airdcpp-hub-commands",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "description": "Adds configurable, per-hub chat commands to the hub user list and user dropdown menus",
   "license": "MIT",
   "private": true,

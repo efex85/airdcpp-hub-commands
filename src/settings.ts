@@ -78,6 +78,9 @@ export const SettingDefinitions = [
         optional: true,
       },
     ],
+    // The server rejects an empty list ('Field can't be empty') unless the list is optional,
+    // and all commands must be removable
+    optional: true,
     default_value: [],
   }
 ];
