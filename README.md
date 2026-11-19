@@ -2,7 +2,7 @@ Add custom commands to airdc-web-client:
 
 Quick install:  AirDC web client > Settings > Extensions > Extension catalog > Install from url >https://github.com/efex85/airdcpp-hub-commands/raw/refs/heads/main/quickinstall/airdcpp-hub-commands-1.8.0.tgz
 
-Add your commands. If no hub address is set its shown in all hubs. Add adcs:// if its a adc hub. Port or kp not needed.
+Add your commands. If no hub address is set its shown in all hubs. Add adcs:// if its a adc hub. Port and kp are optional.
 
 Variables available:\
 {nick} - only in user list\
